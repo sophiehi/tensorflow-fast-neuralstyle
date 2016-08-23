@@ -1,13 +1,11 @@
 # Tensorflow implementation of "Perceptual Losses for Real-Time Style Transfer and Super-Resolution"
 Fast artistic style transfer by using feed forward network.
 
-<img src="" height="200px">
+<img src="https://github.com/antlerros/tensorflow-fast-neuralstyle/blob/master/sample_images/tubingen.jpg?raw=true" height="200px">
 
-<img src="" height="200px">
-<img src="" height="200px">
+<img src="https://github.com/antlerros/tensorflow-fast-neuralstyle/blob/master/sample_images/Robert_Delaunay,_1906,_Portrait_de_Metzinger,_oil_on_canvas,_55_x_43_cm,_DSC08255.jpg?raw=true" height="200px">
+<img src="https://github.com/antlerros/tensorflow-fast-neuralstyle/blob/master/sample_images/RobertD_output.jpg?raw=true" height="200px">
 
-<img src="" height="200px">
-<img src="" height="200px">
 
 - input image size: 1024x768
 - process time(CPU): 2.246 sec (Core i5-5257U)
