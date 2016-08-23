@@ -1,41 +1,33 @@
 import numpy as np
-import os, re
+import os, sys
 import argparse
 from PIL import Image
+import tensorflow as tf
+import time
 
-from chainer import cuda, Variable, optimizers, serializers
-from net import *
+from tf_net import *
+sys.path.append(os.path.join(os.path.dirname(sys.path[0]), "./"))
+from custom_vgg16 import *
 
-def load_image(path, size):
-    image = Image.open(path).convert('RGB')
-    w,h = image.size
-    if w < h:
-        if w < size:
-            image = image.resize((size, size*h/w))
-            w, h = image.size
-    else:
-        if h < size:
-            image = image.resize((size*w/h, size))
-            w, h = image.size
-    image = image.crop(((w-size)*0.5, (h-size)*0.5, (w+size)*0.5, (h+size)*0.5))
-    return xp.asarray(image, dtype=np.float32).transpose(2, 0, 1)
-
-def gram_matrix(y):
-    b, ch, h, w = y.data.shape
-    features = F.reshape(y, (b, ch, w*h))
-    gram = F.batch_matmul(features, features, transb=True)/np.float32(ch*w*h)
+directory = './models/'
+# gram matrix per layer
+def gram_matrix(x):
+    assert isinstance(x, tf.Tensor)
+    b, h, w, ch = x.get_shape().as_list()
+    features = tf.reshape(x, [b, h*w, ch])
+    gram = tf.batch_matmul(features, features, adj_x=True)/tf.constant(ch*w*h, tf.float32)
     return gram
 
+# total variation denoising
 def total_variation_regularization(x, beta=1):
-    xp = cuda.get_array_module(x.data)
-    wh = Variable(xp.array([[[[1],[-1]],[[1],[-1]],[[1],[-1]]]], dtype=xp.float32))
-    ww = Variable(xp.array([[[[1, -1]],[[1, -1]],[[1, -1]]]], dtype=xp.float32))
-    tvh = lambda x: F.convolution_2d(x, W=wh, pad=1)
-    tvw = lambda x: F.convolution_2d(x, W=ww, pad=1)
-
+    assert isinstance(x, tf.Tensor)
+    wh = tf.constant([[[[ 1], [ 1], [ 1]]], [[[-1], [-1], [-1]]]], tf.float32)
+    ww = tf.constant([[[[ 1], [ 1], [ 1]], [[-1], [-1], [-1]]]], tf.float32)
+    tvh = lambda x: conv2d(x, wh, p='SAME')
+    tvw = lambda x: conv2d(x, ww, p='SAME')
     dh = tvh(x)
     dw = tvw(x)
-    tv = (F.sum(dh**2) + F.sum(dw**2)) ** (beta / 2.)
+    tv = (tf.add(tf.reduce_sum(dh**2, [1, 2, 3]), tf.reduce_sum(dw**2, [1, 2, 3]))) ** (beta / 2.)
     return tv
 
 parser = argparse.ArgumentParser(description='Real-time style transfer')
@@ -47,112 +39,119 @@ parser.add_argument('--style_image', '-s', type=str, required=True,
                     help='style image path')
 parser.add_argument('--batchsize', '-b', type=int, default=1,
                     help='batch size (default value is 1)')
-parser.add_argument('--initmodel', '-i', default=None, type=str,
-                    help='initialize the model from given file')
-parser.add_argument('--resume', '-r', default=None, type=str,
-                    help='resume the optimization from snapshot')
-parser.add_argument('--output', '-o', default=None, type=str,
+parser.add_argument('--input', '-i', default=None, type=str,
+                    help='input model file path without extension')
+parser.add_argument('--output', '-o', default='out', type=str,
                     help='output model file path without extension')
-parser.add_argument('--lambda_tv', default=10e-4, type=float,
+parser.add_argument('--lambda_tv', '-l_tv', default=10e-4, type=float,
                     help='weight of total variation regularization according to the paper to be set between 10e-4 and 10e-6.')
-parser.add_argument('--lambda_feat', default=1e0, type=float)
-parser.add_argument('--lambda_style', default=1e1, type=float)
+parser.add_argument('--lambda_feat', '-l_feat', default=1e0, type=float)
+parser.add_argument('--lambda_style', '-l_style', default=1e1, type=float)
 parser.add_argument('--epoch', '-e', default=2, type=int)
 parser.add_argument('--lr', '-l', default=1e-3, type=float)
 parser.add_argument('--checkpoint', '-c', default=0, type=int)
-parser.add_argument('--image_size', default=256, type=int)
 args = parser.parse_args()
 
+data_dict = loadWeightsData('./vgg16.npy')
 batchsize = args.batchsize
 
-image_size = args.image_size
 n_epoch = args.epoch
 lambda_tv = args.lambda_tv
 lambda_f = args.lambda_feat
 lambda_s = args.lambda_style
-style_prefix, _ = os.path.splitext(os.path.basename(args.style_image))
-output = style_prefix if args.output == None else args.output
-fs = os.listdir(args.dataset)
+output = args.output
+
+fpath = os.listdir(args.dataset)
 imagepaths = []
-for fn in fs:
+for fn in fpath:
     base, ext = os.path.splitext(fn)
     if ext == '.jpg' or ext == '.png':
         imagepath = os.path.join(args.dataset,fn)
         imagepaths.append(imagepath)
 n_data = len(imagepaths)
-print 'num traning images:', n_data
-n_iter = n_data / batchsize
-print n_iter, 'iterations,', n_epoch, 'epochs'
+print ('num traning images:', n_data)
+n_iter = int(n_data / batchsize)
+print (n_iter, 'iterations,', n_epoch, 'epochs')
 
-model = FastStyleNet()
-vgg = VGG()
-serializers.load_npz('vgg16.model', vgg)
-if args.initmodel:
-    print 'load model from', args.initmodel
-    serializers.load_npz(args.initmodel, model)
-if args.gpu >= 0:
-    cuda.get_device(args.gpu).use()
-    model.to_gpu()
-    vgg.to_gpu()
-xp = np if args.gpu < 0 else cuda.cupy
+style_ = np.asarray(Image.open(args.style_image).convert('RGB').resize((224,224)), dtype=np.float32)
+styles_ = [style_ for x in range(batchsize)]
 
-O = optimizers.Adam(alpha=args.lr)
-O.setup(model)
-if args.resume:
-    print 'load optimizer state from', args.resume
-    serializers.load_npz(args.resume, O)
+if args.gpu > -1:
+    device_ = '/gpu:{}'.format(args.gpu)
+    print(device_)
+else:
+    device_ = '/cpu:0'
 
-style = vgg.preprocess(np.asarray(Image.open(args.style_image).convert('RGB').resize((image_size,image_size)), dtype=np.float32))
-style = xp.asarray(style, dtype=xp.float32)
-style_b = xp.zeros((batchsize,) + style.shape, dtype=xp.float32)
-for i in range(batchsize):
-    style_b[i] = style
-feature_s = vgg(Variable(style_b, volatile=True))
-gram_s = [gram_matrix(y) for y in feature_s]
+with tf.device(device_):
 
-for epoch in range(n_epoch):
-    print 'epoch', epoch
-    for i in range(n_iter):
-        model.zerograds()
-        vgg.zerograds()
+    model = FastStyleNet()
+    saver = tf.train.Saver()
+    saver_def = saver.as_saver_def()
 
-        indices = range(i * batchsize, (i+1) * batchsize)
-        x = xp.zeros((batchsize, 3, image_size, image_size), dtype=xp.float32)
-        for j in range(batchsize):
-            x[j] = load_image(imagepaths[i*batchsize + j], image_size)
+    inputs = tf.placeholder(tf.float32, shape=[batchsize, 224, 224, 3])
+    target = tf.placeholder(tf.float32, shape=[batchsize, 224, 224, 3])
+    outputs = model(inputs)
 
-        xc = Variable(x.copy(), volatile=True)
-        x = Variable(x)
+    # style target feature
+    # compute gram maxtrix of style target
+    vgg_s = custom_Vgg16(target, data_dict=data_dict)
+    feature_ = [vgg_s.conv1_2, vgg_s.conv2_2, vgg_s.conv3_3, vgg_s.conv4_3, vgg_s.conv5_3]
+    gram_ = [gram_matrix(l) for l in feature_]
 
-        y = model(x)
+    # content target feature 
+    vgg_c = custom_Vgg16(inputs, data_dict=data_dict)
+    feature_ = [vgg_c.conv1_2, vgg_c.conv2_2, vgg_c.conv3_3, vgg_c.conv4_3, vgg_c.conv5_3]
 
-        xc -= 120
-        y -= 120
+    # feature after transformation 
+    vgg = custom_Vgg16(outputs, data_dict=data_dict)
+    feature = [vgg.conv1_2, vgg.conv2_2, vgg.conv3_3, vgg.conv4_3, vgg.conv5_3]
 
-        feature = vgg(xc)
-        feature_hat = vgg(y)
+    # compute feature loss
+    loss_f = tf.zeros(batchsize, tf.float32)
+    for f, f_ in zip(feature, feature_):
+        loss_f += lambda_f * tf.reduce_mean(tf.sub(f, f_) ** 2, [1, 2, 3])
 
-        L_feat = lambda_f * F.mean_squared_error(Variable(feature[2].data), feature_hat[2]) # compute for only the output of layer conv3_3
+    # compute style loss
+    gram = [gram_matrix(l) for l in feature]
+    loss_s = tf.zeros(batchsize, tf.float32)
+    for g, g_ in zip(gram, gram_):
+        loss_s += lambda_s * tf.reduce_mean(tf.sub(g, g_) ** 2, [1, 2])
 
-        L_style = Variable(xp.zeros((), dtype=np.float32))
-        for f, f_hat, g_s in zip(feature, feature_hat, gram_s):
-            L_style += lambda_s * F.mean_squared_error(gram_matrix(f_hat), Variable(g_s.data))
+    # total variation denoising
+    loss_tv = lambda_tv * total_variation_regularization(outputs)
 
-        L_tv = lambda_tv * total_variation_regularization(y)
-        L = L_feat + L_style + L_tv
+    # total loss
+    loss = loss_s + loss_f + loss_tv
 
-        print '(epoch {}) batch {}/{}... training loss is...{}'.format(epoch, i, n_iter, L.data)
+    # optimizer
+    train_step = tf.train.AdamOptimizer(args.lr).minimize(loss)
 
-        L.backward()
-        O.update()
+# for calculating time
+s_time = time.time()
 
-        if args.checkpoint > 0 and i % args.checkpoint == 0:
-            serializers.save_npz('models/{}_{}_{}.model'.format(output, epoch, i), model)
-            serializers.save_npz('models/{}_{}_{}.state'.format(output, epoch, i), O)
+with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as sess:
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
-    print 'save "style.model"'
-    serializers.save_npz('models/{}_{}.model'.format(output, epoch), model)
-    serializers.save_npz('models/{}_{}.state'.format(output, epoch), O)
+    # training
+    tf.initialize_all_variables().run()
 
-serializers.save_npz('models/{}.model'.format(output), model)
-serializers.save_npz('models/{}.state'.format(output), O)
+    if args.input:
+        saver.restore(sess, args.input)
+        print ('restoring model....')
+
+    for epoch in range(n_epoch):
+        print ('epoch', epoch)
+        imgs = np.zeros((batchsize, 224, 224, 3), dtype=np.float32)
+        for i in range(n_iter):
+            for j in range(batchsize):
+                p = imagepaths[i*batchsize + j]
+                imgs[j] = np.asarray(Image.open(p).convert('RGB').resize((224, 224)), np.float32)
+            feed_dict = {inputs: imgs, target:styles_}
+            loss_, _= sess.run([loss, train_step,], feed_dict=feed_dict)
+            print('(epoch {}) batch {}/{}... training loss is...{}'.format(epoch, i, n_iter-1, loss_[0]))
+    saver.save(sess, directory + args.output + '.model', write_meta_graph=False)
+
+print('training time: {} sec'.format(time.time() - s_time))
+
+
