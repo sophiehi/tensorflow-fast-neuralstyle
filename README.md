@@ -41,7 +41,7 @@ python generate.py <input_image_path> -m <model_path> -o <output_image_path>
 
 ## Difference from paper
 - Convolution kernel size 4 instead of 3.
-- Training with batchsize(n>=2) haven't been tested yet.
+- Training with batchsize(n>=2) hasn't been tested yet.
 
 ## License
 MIT
