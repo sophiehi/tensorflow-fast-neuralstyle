@@ -134,7 +134,7 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
         os.makedirs(directory)
 
     # training
-    tf.initialize_all_variables().run()
+    tf.global_variables_initializer().run()
 
     if args.input:
         saver.restore(sess, args.input)
