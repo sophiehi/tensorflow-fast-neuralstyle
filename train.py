@@ -15,7 +15,7 @@ def gram_matrix(x):
     assert isinstance(x, tf.Tensor)
     b, h, w, ch = x.get_shape().as_list()
     features = tf.reshape(x, [b, h*w, ch])
-    gram = tf.batch_matmul(features, features, adj_x=True)/tf.constant(ch*w*h, tf.float32)
+    gram = tf.matmul(features, features, adjoint_a=True)/tf.constant(ch*w*h, tf.float32)
     return gram
 
 # total variation denoising
@@ -109,13 +109,13 @@ with tf.device(device_):
     # compute feature loss
     loss_f = tf.zeros(batchsize, tf.float32)
     for f, f_ in zip(feature, feature_):
-        loss_f += lambda_f * tf.reduce_mean(tf.sub(f, f_) ** 2, [1, 2, 3])
+        loss_f += lambda_f * tf.reduce_mean(tf.subtract(f, f_) ** 2, [1, 2, 3])
 
     # compute style loss
     gram = [gram_matrix(l) for l in feature]
     loss_s = tf.zeros(batchsize, tf.float32)
     for g, g_ in zip(gram, gram_):
-        loss_s += lambda_s * tf.reduce_mean(tf.sub(g, g_) ** 2, [1, 2])
+        loss_s += lambda_s * tf.reduce_mean(tf.subtract(g, g_) ** 2, [1, 2])
 
     # total variation denoising
     loss_tv = lambda_tv * total_variation_regularization(outputs)

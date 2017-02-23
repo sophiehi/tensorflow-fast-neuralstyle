@@ -16,7 +16,7 @@ def loadWeightsData(vgg16_npy_path=None):
         print (vgg16_npy_path)
     return np.load(vgg16_npy_path, encoding='latin1').item()
 
-class custom_Vgg16(vgg16.Vgg16):
+class custom_Vgg16(vgg16):
     # Input should be an rgb image [batch, height, width, 3]
     # values scaled [0, 1]
 
@@ -30,12 +30,12 @@ class custom_Vgg16(vgg16.Vgg16):
         # rgb_scaled = rgb * 255.0
         rgb_scaled = rgb
         # Convert RGB to BGR
-        red, green, blue = tf.split(3, 3, rgb_scaled)
-        bgr = tf.concat(3, [
+        red, green, blue = tf.split(rgb_scaled, 3, 3)
+        bgr = tf.concat( [
             blue - VGG_MEAN[0],
             green - VGG_MEAN[1],
             red - VGG_MEAN[2],
-        ])
+        ], 3)
 
         self.conv1_1 = self.conv_layer(bgr, "conv1_1")
         self.conv1_2 = self.conv_layer(self.conv1_1, "conv1_2")
