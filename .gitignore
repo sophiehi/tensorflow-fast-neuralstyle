@@ -88,3 +88,6 @@ ENV/
 .ropeproject
 vgg16.npy
 result.jpg
+
+# IDE 
+.idea/
